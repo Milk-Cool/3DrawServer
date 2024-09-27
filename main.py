@@ -4,7 +4,7 @@ import mss
 from screeninfo import get_monitors
 from threading import Thread
 from signal import pthread_kill, SIGTSTP
-from time import sleep
+from math import ceil
 
 mouse = Controller()
 mouse_state = False
@@ -12,15 +12,16 @@ mouse_state = False
 addr = ("", 6789)
 s = socket.create_server(addr)
 
+SCREEN_WIDTH = 320
+SCREEN_HEIGHT = 240
+
 d = get_monitors()[0]
 dx, dy = d.width, d.height
-x, y = 0, 0
+x, y = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
+scale = 100
 
 PACKET_LEN = 5
 SCREEN_PACKET_SIZE = 512
-
-SCREEN_WIDTH = 320
-SCREEN_HEIGHT = 240
 
 DEPTH = 3
 SIZE = SCREEN_WIDTH * SCREEN_HEIGHT * DEPTH
@@ -29,9 +30,12 @@ def send_thread(conn: socket.socket):
     global x, y, SCREEN_WIDTH, SCREEN_HEIGHT, DEPTH
     with mss.mss() as sct:
         while True:
-            screen_packet = bytearray()
-            screen_packet.append(DEPTH)
-            monitor = { "top": y, "left": x, "width": SCREEN_WIDTH, "height": SCREEN_HEIGHT }
+            scale_fl = scale / 100
+            left = x - int(scale_fl * (SCREEN_WIDTH // 2))
+            top = y - int(scale_fl * (SCREEN_HEIGHT // 2))
+            width = int(SCREEN_WIDTH * scale_fl)
+            height = int(SCREEN_HEIGHT * scale_fl)
+            monitor = { "top": top, "left": left, "width": width, "height": height }
             img = sct.grab(monitor)
             conn.send(b"\x00\x00\x00")
 
@@ -39,7 +43,7 @@ def send_thread(conn: socket.socket):
             out = bytearray()
             for tx in range(SCREEN_WIDTH):
                 for ty in range(SCREEN_HEIGHT):
-                    out.extend(bytearray(pixels[(SCREEN_HEIGHT - ty - 1) * SCREEN_WIDTH + tx][::-1]))
+                    out.extend(bytearray(pixels[int(height - ty * scale_fl - 1) * width + int(tx * scale_fl)][::-1]))
             conn.send(bytes([(SIZE >> 16) & 0xff, (SIZE >> 8) & 0xff, (SIZE >> 0) & 0xff])
                 + bytes(out))
             print("sent screen")
@@ -66,10 +70,13 @@ while True:
         data_x = data[1] << 8 | data[2]
         data_y = data[3] << 8 | data[4]
         print(f"Raw packet data: t = {data_t}; x = {data_x}; y = {data_y}")
+        scale_fl = scale / 100
         if data_t == 0x00:
             pass # just update screen
         elif data_t == 0x01:
-            mouse.position = (x + data_x, y + data_y)
+            px = x - int((SCREEN_WIDTH // 2) * scale_fl) + int(data_x * scale_fl)
+            py = y - int((SCREEN_HEIGHT // 2) * scale_fl) + int(data_y * scale_fl)
+            mouse.position = (px, py)
             if not mouse_state:
                 mouse.press(Button.left)
                 mouse_state = True
@@ -77,7 +84,15 @@ while True:
             mouse.release(Button.left)
             mouse_state = False
         elif data_t == 0x03:
-            x, y = data_x, data_y
+            x = max(min(data_x, dx - ceil((SCREEN_WIDTH // 2) * scale_fl) - 1), int((SCREEN_WIDTH // 2) * scale_fl))
+            y = max(min(data_y, dy - ceil((SCREEN_HEIGHT // 2) * scale_fl) - 1), int((SCREEN_HEIGHT // 2) * scale_fl))
+        elif data_t == 0x04:
+            scale = max(50, scale - 1)
+        elif data_t == 0x05:
+            st = (scale + 1) / 100
+            if ((x >= int((SCREEN_WIDTH // 2) * st) and x < dx - ceil((SCREEN_WIDTH // 2) * st) - 1)
+                    and (y >= int((SCREEN_HEIGHT // 2) * st) and y < dy - ceil((SCREEN_HEIGHT // 2) * st) - 1)):
+                scale = min(300, scale + 1)
         else:
             print("Invalid packet!!!")
     pthread_kill(t.ident, SIGTSTP)
